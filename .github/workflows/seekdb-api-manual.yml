@@ -2,6 +2,11 @@ name: SeekDB upstream API subset (experimental)
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: 'strict = verified 8; broad = all upstream Go API + exact SDK attempt'
+        type: choice
+        options: [strict, broad]
+        default: strict
       pr:
         description: 'Trusted upstream RAGFlow PR number; blank tests pinned baseline'
         type: string
@@ -13,7 +18,7 @@ concurrency:
 jobs:
   api:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: ${{ inputs.mode == 'broad' && 120 || 90 }}
     env:
       BASELINE: dc8768a32b7dc537e65a9cc4c9bb4dd65ed66ddc
     steps:
@@ -59,11 +64,13 @@ jobs:
             -f candidate/Dockerfile.api-ci -t seekdb-api-candidate:local candidate \
             2>&1 | tee artifacts/build.log
       - name: Start real SeekDB and full Go server
+        id: stack
         run: |
           set -euo pipefail
           docker compose --env-file runtime/.env --project-directory runtime -f runtime/docker-compose.yml -f runtime/api.override.yml -p seekdb-api up -d
           # Authentication bootstrap retries server readiness for five minutes.
       - name: Run exact upstream tests and assert no missing or skipped cases
+        if: inputs.mode != 'broad'
         env:
           HOST_ADDRESS: http://127.0.0.1:9380
           RAGFLOW_TEST_EMAIL: seekdb-ci@example.invalid
@@ -77,6 +84,60 @@ jobs:
           cat artifacts/api.json
           go run harness/ci/verify-api.go harness/ci/api-cases.txt artifacts/api.json
           exit "$rc"
+      - name: Run all unchanged upstream Go API tests
+        id: broad_go
+        if: inputs.mode == 'broad'
+        continue-on-error: true
+        env:
+          HOST_ADDRESS: http://127.0.0.1:9380
+          RAGFLOW_TEST_EMAIL: seekdb-ci@example.invalid
+        run: |
+          set -euo pipefail
+          set +e
+          (cd api-client && timeout 2800 go test -tags integration -count=1 -timeout 45m -json .) > artifacts/api-all.json 2>&1
+          rc=$?
+          echo "$rc" > artifacts/api-all.exit
+          go run harness/ci/report-api.go artifacts/api-all.json > artifacts/api-all-summary.md
+          report_rc=$?
+          set -e
+          cat artifacts/api-all-summary.md
+          cat artifacts/api-all-summary.md >> "$GITHUB_STEP_SUMMARY"
+          (( rc == 0 && report_rc == 0 ))
+      - name: Attempt unchanged upstream SDK p2 independently
+        id: broad_sdk
+        if: ${{ !cancelled() && inputs.mode == 'broad' && steps.broad_go.outcome != 'skipped' }}
+        continue-on-error: true
+        run: bash harness/ci/try-upstream-sdk.sh
+      - name: Verify real seekdb lexical and hybrid retrieval
+        id: hybrid
+        if: ${{ !cancelled() && inputs.mode == 'broad' && steps.stack.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          CGO_ENABLED: '0'
+          RAGFLOW_TEST_OCEANBASE_HOST: 127.0.0.1
+          RAGFLOW_TEST_OCEANBASE_PORT: '2881'
+          RAGFLOW_TEST_OCEANBASE_ENGINE_TYPE: seekdb
+          RAGFLOW_TEST_OCEANBASE_DBNAME: ragflow_doc
+          RAGFLOW_TEST_OCEANBASE_USER: root
+          RAGFLOW_TEST_OCEANBASE_PASSWORD: infini_rag_flow
+        run: |
+          set -euo pipefail
+          rm -f candidate/internal/engine/oceanbase/integration_test.go candidate/internal/engine/oceanbase/seekdb_ci_text_hybrid_test.go
+          cp baseline/internal/engine/oceanbase/integration_test.go candidate/internal/engine/oceanbase/integration_test.go
+          cp harness/ci/seekdb_text_hybrid_test.go candidate/internal/engine/oceanbase/seekdb_ci_text_hybrid_test.go
+          (cd candidate && go test -tags=integration -count=1 -timeout=5m -json -run '^TestSeekDBLexicalHybridContributions$' ./internal/engine/oceanbase/) | tee artifacts/seekdb-hybrid.json
+          printf '%s\n' TestSeekDBLexicalHybridContributions > artifacts/hybrid-cases.txt
+          go run harness/ci/verify-api.go artifacts/hybrid-cases.txt artifacts/seekdb-hybrid.json
+      - name: Report broad suite outcomes without concealing failures
+        if: ${{ !cancelled() && inputs.mode == 'broad' && steps.broad_go.outcome != 'skipped' }}
+        env:
+          GO_OUTCOME: ${{ steps.broad_go.outcome }}
+          SDK_OUTCOME: ${{ steps.broad_sdk.outcome }}
+          HYBRID_OUTCOME: ${{ steps.hybrid.outcome }}
+        run: |
+          echo "Go suite: $GO_OUTCOME; SDK suite: $SDK_OUTCOME; seekdb hybrid: $HYBRID_OUTCOME" | tee -a "$GITHUB_STEP_SUMMARY"
+          cat artifacts/sdk-status.txt | tee -a "$GITHUB_STEP_SUMMARY" || true
+          [[ "$GO_OUTCOME" == success && "$SDK_OUTCOME" == success && "$HYBRID_OUTCOME" == success ]]
       - name: Collect evidence and teardown
         if: always()
         run: |
