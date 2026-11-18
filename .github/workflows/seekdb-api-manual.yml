@@ -56,6 +56,8 @@ jobs:
           df -h | tee artifacts/disk-before.txt
           free -h | tee artifacts/memory-before.txt
           cp baseline/test/api/*.go api-client/
+          mkdir -p benchmark/test_docs
+          cp baseline/test/benchmark/test_docs/Doc1.pdf benchmark/test_docs/
           printf 'module api-client\n\ngo 1.27.0\n' > api-client/go.mod
           bash harness/ci/prepare-api-stack.sh baseline candidate runtime
           # No native cache or credentials: official upstream downloader fallback.

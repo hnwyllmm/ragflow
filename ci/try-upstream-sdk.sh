@@ -15,7 +15,8 @@ timeout 600 bash -c '
   sdk-tools/bin/pip install uv==0.9.11
   sdk-tools/bin/uv venv --python 3.13 sdk-env
   sdk-tools/bin/uv pip install --python sdk-env/bin/python ./baseline/sdk/python \
-    --group baseline/sdk/python/pyproject.toml:test
+    --group baseline/sdk/python/pyproject.toml:test \
+    pytest-asyncio==1.3.0 pytest-xdist==3.8.0 pytest-cov==7.0.0
 ' > artifacts/sdk-setup.log 2>&1
 setup_rc=$?
 echo "$setup_rc" > artifacts/sdk-setup.exit
@@ -32,7 +33,7 @@ echo "$collect_rc" > artifacts/sdk-collection.exit
 rc=$?
 echo "$rc" > artifacts/sdk.exit
 cat artifacts/sdk.log
-if grep -q 'SDK CI provisioning failed' artifacts/sdk.log; then
+if grep -qi 'SDK CI provisioning failed' artifacts/sdk.log; then
   echo 'BLOCKED: original upstream SDK provisioning rejects SeekDB and requires external model credentials' > artifacts/sdk-status.txt
 elif (( rc != 0 )); then
   echo "SDK attempt failed (exit $rc); inspect sdk.log/sdk.xml, do not count as pass" > artifacts/sdk-status.txt
