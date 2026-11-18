@@ -1,0 +1,19 @@
+# Put this small entrypoint on the fork's DEFAULT branch. GitHub schedules only
+# default-branch workflows; the implementation stays on the seekdb-ci branch.
+name: Personal SeekDB CI
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'infiniflow/ragflow PR number; empty tests latest upstream main'
+        type: string
+        default: ''
+  schedule:
+    - cron: '23 22 * * *' # Daily 06:23 UTC+08:00; GitHub may delay scheduled runs.
+permissions: {}
+jobs:
+  seekdb:
+    uses: hnwyllmm/ragflow/.github/workflows/seekdb-ci.yml@cc628c58a2f38fd5adc479619b66e83a68dc2d2f
+    with:
+      pr: ${{ inputs.pr || '' }}
+    # Deliberately no secrets: inherit.
