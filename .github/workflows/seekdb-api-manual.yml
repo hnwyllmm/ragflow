@@ -3,9 +3,9 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'strict = verified 8; broad = all Go API + SDK attempt; legacy = forced reparse'
+        description: 'strict = verified 8; broad = all Go API + SDK attempt; legacy = forced reparse; sdk-local = three unchanged SDK groups'
         type: choice
-        options: [strict, broad, legacy]
+        options: [strict, broad, legacy, sdk-local]
         default: strict
       pr:
         description: 'Trusted upstream RAGFlow PR number; blank tests pinned baseline'
@@ -13,12 +13,12 @@ on:
         default: ''
 permissions: {}
 concurrency:
-  group: seekdb-api-manual
+  group: ${{ inputs.mode == 'sdk-local' && 'seekdb-sdk-local' || 'seekdb-api-manual' }}
   cancel-in-progress: false
 jobs:
   api:
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ inputs.mode == 'broad' && 120 || 90 }}
+    timeout-minutes: ${{ (inputs.mode == 'broad' || inputs.mode == 'sdk-local') && 120 || 90 }}
     env:
       BASELINE: dc8768a32b7dc537e65a9cc4c9bb4dd65ed66ddc
     steps:
@@ -160,6 +160,25 @@ jobs:
           cat artifacts/legacy-worker.json
           go run harness/ci/verify-api.go artifacts/legacy-case.txt artifacts/legacy-worker.json
           exit "$rc"
+      - name: Prepare upstream SDK dependencies
+        if: inputs.mode == 'sdk-local'
+        run: |
+          set -euo pipefail
+          timeout 600 bash -c '
+            set -euo pipefail
+            python3 -m venv sdk-tools
+            sdk-tools/bin/pip install uv==0.9.11
+            sdk-tools/bin/uv venv --python 3.13 sdk-env
+            sdk-tools/bin/uv pip install --python sdk-env/bin/python ./baseline/sdk/python \
+              --group baseline/sdk/python/pyproject.toml:test \
+              pytest-asyncio==1.3.0 pytest-xdist==3.8.0 pytest-cov==7.0.0
+          ' 2>&1 | tee artifacts/sdk-local-deps.log
+      - name: Run unchanged SDK groups with freshly provisioned local tenants
+        if: inputs.mode == 'sdk-local'
+        run: |
+          set -euo pipefail
+          timeout 240 bash -c 'until curl -fsS --max-time 5 http://127.0.0.1:9380/api/v1/system/version >/dev/null 2>&1; do sleep 4; done'
+          bash harness/sdk-local/run.sh all
       - name: Collect evidence and teardown
         if: always()
         run: |
