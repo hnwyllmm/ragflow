@@ -1,0 +1,95 @@
+name: SeekDB upstream API subset (experimental)
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'Trusted upstream RAGFlow PR number; blank tests pinned baseline'
+        type: string
+        default: ''
+permissions: {}
+concurrency:
+  group: seekdb-api-manual
+  cancel-in-progress: false
+jobs:
+  api:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      BASELINE: dc8768a32b7dc537e65a9cc4c9bb4dd65ed66ddc
+    steps:
+      - name: Anonymous checkout of trusted harness and candidate
+        env:
+          PR: ${{ inputs.pr }}
+          HARNESS_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          [[ -z "$PR" || "$PR" =~ ^[1-9][0-9]*$ ]]
+          clone_ref() {
+            git init "$1"
+            git -C "$1" remote add origin "$2"
+            git -C "$1" fetch --depth=1 origin "$3"
+            git -C "$1" checkout --detach FETCH_HEAD
+          }
+          clone_ref harness https://github.com/hnwyllmm/ragflow.git "$HARNESS_SHA"
+          clone_ref baseline https://github.com/infiniflow/ragflow.git "$BASELINE"
+          ref="$BASELINE"; if [[ -n "$PR" ]]; then ref="refs/pull/$PR/head"; fi
+          if [[ -z "$PR" ]]; then
+            cp -a baseline candidate
+          else
+            clone_ref candidate https://github.com/infiniflow/ragflow.git "$ref"
+          fi
+      - uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Prepare exact tests and native server build
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts api-client
+          git -C candidate rev-parse HEAD | tee artifacts/server-sha.txt
+          echo "$BASELINE" | tee artifacts/test-and-config-sha.txt
+          df -h | tee artifacts/disk-before.txt
+          free -h | tee artifacts/memory-before.txt
+          cp baseline/test/api/*.go api-client/
+          printf 'module api-client\n\ngo 1.27.0\n' > api-client/go.mod
+          bash harness/ci/prepare-api-stack.sh baseline candidate runtime
+          # No native cache or credentials: official upstream downloader fallback.
+          docker build --build-arg NEED_MIRROR=0 --build-arg NATIVE_LIBS_REQUIRED=0 \
+            --build-arg GOPROXY=https://proxy.golang.org,direct \
+            -f candidate/Dockerfile.api-ci -t seekdb-api-candidate:local candidate \
+            2>&1 | tee artifacts/build.log
+      - name: Start real SeekDB and full Go server
+        run: |
+          set -euo pipefail
+          docker compose --env-file runtime/.env --project-directory runtime -f runtime/docker-compose.yml -f runtime/api.override.yml -p seekdb-api up -d
+          # Authentication bootstrap retries server readiness for five minutes.
+      - name: Run exact upstream tests and assert no missing or skipped cases
+        env:
+          HOST_ADDRESS: http://127.0.0.1:9380
+          RAGFLOW_TEST_EMAIL: seekdb-ci@example.invalid
+        run: |
+          set -euo pipefail
+          selection="^($(paste -sd'|' harness/ci/api-cases.txt))$"
+          set +e
+          (cd api-client && go test -tags integration -count=1 -timeout 25m -json -run "$selection" .) > artifacts/api.json 2>&1
+          rc=$?
+          set -e
+          cat artifacts/api.json
+          go run harness/ci/verify-api.go harness/ci/api-cases.txt artifacts/api.json
+          exit "$rc"
+      - name: Collect evidence and teardown
+        if: always()
+        run: |
+          mkdir -p artifacts
+          if test -f runtime/api.override.yml; then
+            docker compose --env-file runtime/.env --project-directory runtime -f runtime/docker-compose.yml -f runtime/api.override.yml -p seekdb-api ps -a > artifacts/services.txt 2>&1 || true
+            docker compose --env-file runtime/.env --project-directory runtime -f runtime/docker-compose.yml -f runtime/api.override.yml -p seekdb-api logs --no-color > artifacts/services.log 2>&1 || true
+            docker compose --env-file runtime/.env --project-directory runtime -f runtime/docker-compose.yml -f runtime/api.override.yml -p seekdb-api down -v || true
+          fi
+          df -h > artifacts/disk-after.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: seekdb-api-evidence
+          path: artifacts/
+          retention-days: 7
