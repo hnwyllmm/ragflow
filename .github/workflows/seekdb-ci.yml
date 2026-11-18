@@ -13,11 +13,15 @@ on:
         description: 'Upstream infiniflow/ragflow PR number (empty = main)'
         type: string
         default: ''
+      source_sha:
+        description: 'Immutable upstream commit for comparison runs; mutually exclusive with pr'
+        type: string
+        default: ''
 
 permissions: {}
 
 concurrency:
-  group: seekdb-${{ github.workflow }}-${{ inputs.pr || 'main' }}
+  group: seekdb-${{ github.workflow }}-${{ inputs.source_sha || inputs.pr || 'main' }}
   cancel-in-progress: false
 
 jobs:
@@ -31,11 +35,15 @@ jobs:
         id: resolve
         env:
           PR_NUMBER: ${{ inputs.pr }}
+          REQUESTED_SHA: ${{ inputs.source_sha }}
         shell: bash
         run: |
           set -euo pipefail
           ref=refs/heads/main
-          if [[ -n "$PR_NUMBER" ]]; then
+          if [[ -n "$REQUESTED_SHA" ]]; then
+            [[ -z "$PR_NUMBER" && "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'Specify either a valid commit SHA or a PR number'; exit 1; }
+            ref="$REQUESTED_SHA"
+          elif [[ -n "$PR_NUMBER" ]]; then
             [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,8}$ ]] || { echo 'Invalid PR number'; exit 1; }
             ref="refs/pull/$PR_NUMBER/head"
           fi
@@ -43,6 +51,7 @@ jobs:
           git -C source -c credential.helper= fetch --depth=1 https://github.com/infiniflow/ragflow.git "$ref"
           sha=$(git -C source rev-parse FETCH_HEAD)
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          [[ -z "$REQUESTED_SHA" || "$sha" == "$REQUESTED_SHA" ]]
           printf 'Upstream: infiniflow/ragflow\nRef: %s\nSHA: %s\n' "$ref" "$sha" >> "$GITHUB_STEP_SUMMARY"
 
   smoke:
@@ -81,10 +90,19 @@ jobs:
             "$TARGET_SHA" "$HARNESS_SHA" "$DB_IMAGE" | tee results/source.txt
           cat results/source.txt >> "$GITHUB_STEP_SUMMARY"
           test -d source/internal/engine/oceanbase
+          rm -f -- source/internal/engine/oceanbase/integration_test.go
           curl --fail --silent --show-error --location --retry 3 \
             "https://raw.githubusercontent.com/infiniflow/ragflow/$HARNESS_SHA/internal/engine/oceanbase/integration_test.go" \
             -o source/internal/engine/oceanbase/integration_test.go
           echo 'b6138c19f15a4fdeded300cd2ebc2164232f6034ef82557deb5d0f06e046448d  source/internal/engine/oceanbase/integration_test.go' | sha256sum --check
+          test -d source/internal/engine/oceanbase
+          rm -f -- source/internal/engine/oceanbase/seekdb_ci_filtered_dense_topk_test.go
+          curl --fail --silent --show-error --location --retry 3 "https://raw.githubusercontent.com/hnwyllmm/ragflow/82df5f22bcf69efed0e4f1498848aa0273d3c786/ci/seekdb/filtered_dense_topk_test.go" -o source/internal/engine/oceanbase/seekdb_ci_filtered_dense_topk_test.go
+          echo '48f449d02d05ecec5bc26e3bfd747cd19670b5bb1bbdbcf6ee3e07fc02955bed  source/internal/engine/oceanbase/seekdb_ci_filtered_dense_topk_test.go' | sha256sum --check
+          test -d source/internal/service/document
+          rm -f -- source/internal/service/document/seekdb_ci_legacy_document_rerun_test.go
+          curl --fail --silent --show-error --location --retry 3 "https://raw.githubusercontent.com/hnwyllmm/ragflow/82df5f22bcf69efed0e4f1498848aa0273d3c786/ci/seekdb/legacy_document_rerun_test.go" -o source/internal/service/document/seekdb_ci_legacy_document_rerun_test.go
+          echo '6ff00c514cfc3a0b16bf8994e262462fb11b91b944e7a6a11317408069f1f1d8  source/internal/service/document/seekdb_ci_legacy_document_rerun_test.go' | sha256sum --check
 
       - name: Install Go toolchain
         uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5
@@ -127,7 +145,7 @@ jobs:
           [[ "$ready" == true ]] || { docker logs "$name"; echo 'Database failed SQL readiness'; exit 1; }
           MYSQL_PWD=seekdb-ci-ephemeral mysql -h127.0.0.1 -P"$port" -u"$DB_USER" -Nse 'SELECT VERSION()' ragflow_doc | tee results/database-version.txt
 
-      - name: Run actual storage integration test
+      - name: Run database regression tests
         env:
           CGO_ENABLED: '0'
           RAGFLOW_TEST_OCEANBASE_HOST: 127.0.0.1
@@ -140,8 +158,11 @@ jobs:
           set -euo pipefail
           cd source
           go test -tags=integration -count=1 -timeout=10m -json \
-            -run '^TestLegacyStorageRoundTrip$' ./internal/engine/oceanbase/ \
-            | tee ../results/go-test.jsonl
+            -run '^(TestLegacyStorageRoundTrip|TestFilteredDenseTopK)$' ./internal/engine/oceanbase/ \
+            | tee ../results/go-engine-test.jsonl
+          go test -tags=integration -count=1 -timeout=10m -json \
+            -run '^TestLegacyTableReparseDelete22082$' ./internal/service/document/ \
+            | tee ../results/go-document-test.jsonl
 
       - name: Require real test execution, not skip or no-tests success
         shell: bash
@@ -149,15 +170,19 @@ jobs:
           python3 - <<'PY'
           import json
           from pathlib import Path
-          events = [json.loads(line) for line in Path('results/go-test.jsonl').read_text().splitlines() if line.strip()]
-          name = 'TestLegacyStorageRoundTrip'
-          package = 'ragflow/internal/engine/oceanbase'
-          matching = [e for e in events if e.get('Test') == name and e.get('Package') == package]
-          assert any(e.get('Action') == 'run' for e in matching), 'Required integration test did not run'
-          assert any(e.get('Action') == 'pass' for e in matching), 'Required integration test did not pass'
-          assert not any(e.get('Action') in ('skip', 'fail') for e in events), 'Skipped or failed test detected'
-          assert any(e.get('Action') == 'pass' and e.get('Package') == package and 'Test' not in e for e in events), 'Package did not pass'
-          print('Verified real database storage integration test PASS')
+          suites = {
+              'go-engine-test.jsonl': ('ragflow/internal/engine/oceanbase', ('TestLegacyStorageRoundTrip', 'TestFilteredDenseTopK')),
+              'go-document-test.jsonl': ('ragflow/internal/service/document', ('TestLegacyTableReparseDelete22082',)),
+          }
+          for log_name, (package, names) in suites.items():
+              events = [json.loads(line) for line in (Path('results') / log_name).read_text().splitlines() if line.strip()]
+              assert not any(e.get('Action') in ('skip', 'fail') for e in events), f'{log_name}: skipped or failed test'
+              package_events = [e for e in events if e.get('Package') == package]
+              for name in names:
+                  actions = {e.get('Action') for e in package_events if e.get('Test') == name}
+                  assert {'run', 'pass'} <= actions, f'{name} did not execute and pass'
+                  print(f'Verified real database {name} PASS')
+              assert any(e.get('Action') == 'pass' and 'Test' not in e for e in package_events), f'{package} did not pass'
           PY
 
       - name: Collect database logs and remove container

@@ -1,0 +1,20 @@
+# Branch-only candidate launcher; the default branch pins a reviewed implementation.
+name: Personal SeekDB CI candidate
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'infiniflow/ragflow PR number (empty = main)'
+        type: string
+        default: ''
+      source_sha:
+        description: 'Exact upstream commit for regression comparisons (optional)'
+        type: string
+        default: ''
+permissions: {}
+jobs:
+  seekdb:
+    uses: ./.github/workflows/seekdb-ci.yml
+    with:
+      pr: ${{ inputs.pr }}
+      source_sha: ${{ inputs.source_sha }}
