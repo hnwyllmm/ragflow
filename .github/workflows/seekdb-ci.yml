@@ -1,0 +1,228 @@
+name: SeekDB real database smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'Upstream infiniflow/ragflow PR number (empty = main)'
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      pr:
+        description: 'Upstream infiniflow/ragflow PR number (empty = main)'
+        type: string
+        default: ''
+
+permissions: {}
+
+concurrency:
+  group: seekdb-${{ github.workflow }}-${{ inputs.pr || 'main' }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: Resolve upstream main or PR head to immutable SHA
+        id: resolve
+        env:
+          PR_NUMBER: ${{ inputs.pr }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref=refs/heads/main
+          if [[ -n "$PR_NUMBER" ]]; then
+            [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,8}$ ]] || { echo 'Invalid PR number'; exit 1; }
+            ref="refs/pull/$PR_NUMBER/head"
+          fi
+          git init source
+          git -C source -c credential.helper= fetch --depth=1 https://github.com/infiniflow/ragflow.git "$ref"
+          sha=$(git -C source rev-parse FETCH_HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          printf 'Upstream: infiniflow/ragflow\nRef: %s\nSHA: %s\n' "$ref" "$sha" >> "$GITHUB_STEP_SUMMARY"
+
+  smoke:
+    needs: resolve
+    name: Storage round trip (${{ matrix.backend }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - backend: seekdb
+            user: root
+            image: oceanbase/seekdb:1.4.0-100000172026082615@sha256:4db4961869d554313520d6081fca29265ba6da6db7313311bd8acbed771a956b
+          - backend: oceanbase
+            user: root@ragflow
+            image: oceanbase/oceanbase-ce:4.4.1.0-100000032025101610@sha256:bb60d41b8731744bb351eb01395822efff07b5750b4745bdb0e44dd804a40963
+    env:
+      DB_IMAGE: ${{ matrix.image }}
+      DB_BACKEND: ${{ matrix.backend }}
+      DB_USER: ${{ matrix.user }}
+      TARGET_SHA: ${{ needs.resolve.outputs.sha }}
+      HARNESS_SHA: dc8768a32b7dc537e65a9cc4c9bb4dd65ed66ddc
+    steps:
+      # No actions/checkout: anonymous fetch never persists GitHub credentials.
+      - name: Fetch exact upstream source and trusted test
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir source results
+          git -C source init
+          git -C source -c credential.helper= fetch --depth=1 https://github.com/infiniflow/ragflow.git "$TARGET_SHA"
+          git -C source checkout --detach FETCH_HEAD
+          [[ "$(git -C source rev-parse HEAD)" == "$TARGET_SHA" ]]
+          printf 'repository=infiniflow/ragflow\nsha=%s\nharness=%s\nimage=%s\n' \
+            "$TARGET_SHA" "$HARNESS_SHA" "$DB_IMAGE" | tee results/source.txt
+          cat results/source.txt >> "$GITHUB_STEP_SUMMARY"
+          test -d source/internal/engine/oceanbase
+          curl --fail --silent --show-error --location --retry 3 \
+            "https://raw.githubusercontent.com/infiniflow/ragflow/$HARNESS_SHA/internal/engine/oceanbase/integration_test.go" \
+            -o source/internal/engine/oceanbase/integration_test.go
+          echo 'b6138c19f15a4fdeded300cd2ebc2164232f6034ef82557deb5d0f06e046448d  source/internal/engine/oceanbase/integration_test.go' | sha256sum --check
+
+      - name: Install Go toolchain
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5
+        with:
+          go-version-file: source/go.mod
+          cache: false
+
+      - name: Start isolated database and wait for SQL readiness
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends mysql-client
+          name="ragflow-${DB_BACKEND}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "DB_CONTAINER=$name" >> "$GITHUB_ENV"
+          if [[ "$DB_BACKEND" == seekdb ]]; then
+            docker run -d --name "$name" --cpus=2 --memory=3g \
+              -p 127.0.0.1::2881 \
+              -e ROOT_PASSWORD=seekdb-ci-ephemeral -e SEEKDB_DATABASE=ragflow_doc \
+              -e CPU_COUNT=2 -e MEMORY_LIMIT=2G -e DATAFILE_SIZE=2G \
+              -e DATAFILE_MAXSIZE=4G -e LOG_DISK_SIZE=2G "$DB_IMAGE"
+          else
+            docker run -d --name "$name" --memory=8g --ulimit nofile=655350:655350 \
+              -p 127.0.0.1::2881 -e MODE=mini -e OB_SERVER_IP=127.0.0.1 \
+              -e OB_TENANT_NAME=ragflow -e OB_TENANT_PASSWORD=seekdb-ci-ephemeral \
+              -e OB_DATABASE=ragflow_doc -e OB_MEMORY_LIMIT=6G \
+              -e OB_DATAFILE_SIZE=5G -e OB_LOG_DISK_SIZE=5G "$DB_IMAGE"
+          fi
+          port=$(docker port "$name" 2881/tcp | awk -F: '{print $NF}')
+          [[ "$port" =~ ^[0-9]+$ ]]
+          echo "RAGFLOW_TEST_OCEANBASE_PORT=$port" >> "$GITHUB_ENV"
+          ready=false
+          for attempt in $(seq 1 180); do
+            if MYSQL_PWD=seekdb-ci-ephemeral mysql --connect-timeout=3 -h127.0.0.1 -P"$port" -u"$DB_USER" -Nse 'CREATE DATABASE IF NOT EXISTS ragflow_doc; SELECT 1' > results/readiness.txt 2>/dev/null && grep -qx 1 results/readiness.txt; then
+              ready=true
+              break
+            fi
+            sleep 5
+          done
+          [[ "$ready" == true ]] || { docker logs "$name"; echo 'Database failed SQL readiness'; exit 1; }
+          MYSQL_PWD=seekdb-ci-ephemeral mysql -h127.0.0.1 -P"$port" -u"$DB_USER" -Nse 'SELECT VERSION()' ragflow_doc | tee results/database-version.txt
+
+      - name: Run actual storage integration test
+        env:
+          CGO_ENABLED: '0'
+          RAGFLOW_TEST_OCEANBASE_HOST: 127.0.0.1
+          RAGFLOW_TEST_OCEANBASE_ENGINE_TYPE: ${{ matrix.backend }}
+          RAGFLOW_TEST_OCEANBASE_DBNAME: ragflow_doc
+          RAGFLOW_TEST_OCEANBASE_USER: ${{ matrix.user }}
+          RAGFLOW_TEST_OCEANBASE_PASSWORD: seekdb-ci-ephemeral
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd source
+          go test -tags=integration -count=1 -timeout=10m -json \
+            -run '^TestLegacyStorageRoundTrip$' ./internal/engine/oceanbase/ \
+            | tee ../results/go-test.jsonl
+
+      - name: Require real test execution, not skip or no-tests success
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          events = [json.loads(line) for line in Path('results/go-test.jsonl').read_text().splitlines() if line.strip()]
+          name = 'TestLegacyStorageRoundTrip'
+          package = 'ragflow/internal/engine/oceanbase'
+          matching = [e for e in events if e.get('Test') == name and e.get('Package') == package]
+          assert any(e.get('Action') == 'run' for e in matching), 'Required integration test did not run'
+          assert any(e.get('Action') == 'pass' for e in matching), 'Required integration test did not pass'
+          assert not any(e.get('Action') in ('skip', 'fail') for e in events), 'Skipped or failed test detected'
+          assert any(e.get('Action') == 'pass' and e.get('Package') == package and 'Test' not in e for e in events), 'Package did not pass'
+          print('Verified real database storage integration test PASS')
+          PY
+
+      - name: Collect database logs and remove container
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p results
+          docker logs "$DB_CONTAINER" > results/database.log 2>&1 || true
+          docker rm -f "$DB_CONTAINER" || true
+
+      - name: Save diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: storage-${{ matrix.backend }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: results/
+          retention-days: 7
+          if-no-files-found: error
+
+  migration:
+    name: Elasticsearch to OceanBase migration tests
+    needs: resolve
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TARGET_SHA: ${{ needs.resolve.outputs.sha }}
+    steps:
+      - name: Fetch the same immutable upstream commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init source
+          git -C source -c credential.helper= fetch --depth=1 https://github.com/infiniflow/ragflow.git "$TARGET_SHA"
+          git -C source checkout --detach FETCH_HEAD
+          [[ "$(git -C source rev-parse HEAD)" == "$TARGET_SHA" ]]
+          mkdir results
+          echo "$TARGET_SHA" > results/source-sha.txt
+      - name: Install pinned uv in isolated environment
+        run: |
+          python3 -m venv "$RUNNER_TEMP/uv-venv"
+          "$RUNNER_TEMP/uv-venv/bin/python" -m pip install uv==0.9.5
+      - name: Run original PR migration test selection
+        working-directory: source/tools/es-to-oceanbase-migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/uv-venv/bin/uv" run --python 3.13 --extra dev pytest -q \
+            --junitxml="$GITHUB_WORKSPACE/results/migration.xml"
+      - name: Require migration tests to execute without skips
+        run: |
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse('results/migration.xml').getroot()
+          tests = root.findall('.//testcase')
+          assert tests, 'No migration tests executed'
+          assert not root.findall('.//skipped'), 'Migration test skipped'
+          assert not root.findall('.//failure'), 'Migration test failed'
+          assert not root.findall('.//error'), 'Migration test error'
+          print(f'Verified {len(tests)} migration tests')
+          PY
+      - name: Save migration diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: migration-${{ github.run_id }}-${{ github.run_attempt }}
+          path: results/
+          retention-days: 7
+          if-no-files-found: error
