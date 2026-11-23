@@ -1,0 +1,29 @@
+internal/engine/oceanbase/schema.go
+  s_15dd13b9cac631::t_c589530c1acec6 167-168,170,175-177
+  s_15dd13b9cac631::t_7be480a5c374b2 178
+internal/engine/oceanbase/integration_test.go
+  s_15dd13b9cac631::t_c589530c1acec6 214,219-220,223-227,256
+  s_15dd13b9cac631::t_5fc8799348e4b6 221,254
+internal/engine/oceanbase/rows.go
+  s_15dd13b9cac631::t_c589530c1acec6 282
+internal/engine/oceanbase/crud.go
+  s_15dd13b9cac631::t_c589530c1acec6 198,203,208
+internal/engine/oceanbase/filter.go
+  s_15dd13b9cac631::t_c589530c1acec6 41,49,53,66,70-74,76
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "26d42988962ac4bf121d8fb061d3076446338462",
+  "prompts": {},
+  "sessions": {
+    "s_15dd13b9cac631": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1bded-c539-7eb3-be2b-bd47f3c797c3",
+        "model": "gpt-6.2-sol"
+      },
+      "human_author": "wangyunlai.wyl <wangyunlai.wyl@U-Y44N21LQ-2319.local>"
+    }
+  }
+}
