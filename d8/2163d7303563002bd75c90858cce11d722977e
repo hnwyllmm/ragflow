@@ -1,0 +1,40 @@
+internal/engine/oceanbase/sql_test.go
+  s_15dd13b9cac631::t_7fcded95b4eaaa 108,121,134,148
+internal/engine/oceanbase/filter.go
+  s_15dd13b9cac631::t_9c8839b17cbf45 40-41,176-177
+  s_15dd13b9cac631::t_087f6271fb5265 171-173,175
+  s_15dd13b9cac631::t_ad677eb4184617 20,26-39,42-73,104-105,108,121-122,125,166,170,174,178-181,184-186,191,202,204
+internal/engine/oceanbase/search_test.go
+  s_15dd13b9cac631::t_2b83f237d49b12 103-105,112-114,116,118
+internal/engine/oceanbase/crud.go
+  s_15dd13b9cac631::t_112bf54c731a41 360-361
+  s_15dd13b9cac631::t_a1d8284d1a4688 22,179,196-201,203-216,238,241-246,248,254-258,278-281,288-290,306-308,321-330,354-359,362-369,397-404
+  s_15dd13b9cac631::t_9c8839b17cbf45 202
+internal/engine/oceanbase/search.go
+  s_15dd13b9cac631::t_efc442688e9c37 127-135,150,171,177,183
+internal/engine/oceanbase/metadata.go
+  s_15dd13b9cac631::t_7fcded95b4eaaa 134,215
+internal/engine/oceanbase/integration_test.go
+  s_15dd13b9cac631::t_c1818d634ab86d 35-36,53-55,57-58,186-290
+  s_15dd13b9cac631::t_e8d970b857a010 291
+internal/engine/oceanbase/message_contract_test.go
+  s_15dd13b9cac631::t_7fcded95b4eaaa 26,30
+internal/engine/oceanbase/rows.go
+  s_15dd13b9cac631::t_9c8839b17cbf45 243,298
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "d82163d7303563002bd75c90858cce11d722977e",
+  "prompts": {},
+  "sessions": {
+    "s_15dd13b9cac631": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a1bded-c539-7eb3-be2b-bd47f3c797c3",
+        "model": "gpt-6.2-sol"
+      },
+      "human_author": "wangyunlai.wyl <wangyunlai.wyl@U-Y44N21LQ-2319.local>"
+    }
+  }
+}
