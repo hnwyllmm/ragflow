@@ -7,6 +7,10 @@ on:
         description: 'Upstream infiniflow/ragflow PR number (empty = main)'
         type: string
         default: ''
+      source_sha:
+        description: 'Exact upstream commit (optional, mutually exclusive with pr)'
+        type: string
+        default: ''
   workflow_call:
     inputs:
       pr:
@@ -56,7 +60,7 @@ jobs:
 
   smoke:
     needs: resolve
-    name: Storage round trip (${{ matrix.backend }})
+    name: Database integration (${{ matrix.backend }})
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
@@ -74,10 +78,9 @@ jobs:
       DB_BACKEND: ${{ matrix.backend }}
       DB_USER: ${{ matrix.user }}
       TARGET_SHA: ${{ needs.resolve.outputs.sha }}
-      HARNESS_SHA: dc8768a32b7dc537e65a9cc4c9bb4dd65ed66ddc
     steps:
       # No actions/checkout: anonymous fetch never persists GitHub credentials.
-      - name: Fetch exact upstream source and trusted test
+      - name: Fetch source and tests at the same upstream commit
         shell: bash
         run: |
           set -euo pipefail
@@ -86,21 +89,15 @@ jobs:
           git -C source -c credential.helper= fetch --depth=1 https://github.com/infiniflow/ragflow.git "$TARGET_SHA"
           git -C source checkout --detach FETCH_HEAD
           [[ "$(git -C source rev-parse HEAD)" == "$TARGET_SHA" ]]
-          printf 'repository=infiniflow/ragflow\nsha=%s\nharness=%s\nimage=%s\n' \
-            "$TARGET_SHA" "$HARNESS_SHA" "$DB_IMAGE" | tee results/source.txt
+          printf 'repository=infiniflow/ragflow\nsha=%s\nimage=%s\n' \
+            "$TARGET_SHA" "$DB_IMAGE" | tee results/source.txt
           cat results/source.txt >> "$GITHUB_STEP_SUMMARY"
           test -d source/internal/engine/oceanbase
-          rm -f -- source/internal/engine/oceanbase/integration_test.go
-          curl --fail --silent --show-error --location --retry 3 \
-            "https://raw.githubusercontent.com/infiniflow/ragflow/$HARNESS_SHA/internal/engine/oceanbase/integration_test.go" \
-            -o source/internal/engine/oceanbase/integration_test.go
-          echo 'b6138c19f15a4fdeded300cd2ebc2164232f6034ef82557deb5d0f06e046448d  source/internal/engine/oceanbase/integration_test.go' | sha256sum --check
-          test -d source/internal/engine/oceanbase
-          rm -f -- source/internal/engine/oceanbase/seekdb_ci_filtered_dense_topk_test.go
+          [[ ! -e source/internal/engine/oceanbase/seekdb_ci_filtered_dense_topk_test.go && ! -L source/internal/engine/oceanbase/seekdb_ci_filtered_dense_topk_test.go ]] || { echo "Supplemental fixture path already exists in source"; exit 1; }
           curl --fail --silent --show-error --location --retry 3 "https://raw.githubusercontent.com/hnwyllmm/ragflow/82df5f22bcf69efed0e4f1498848aa0273d3c786/ci/seekdb/filtered_dense_topk_test.go" -o source/internal/engine/oceanbase/seekdb_ci_filtered_dense_topk_test.go
           echo '48f449d02d05ecec5bc26e3bfd747cd19670b5bb1bbdbcf6ee3e07fc02955bed  source/internal/engine/oceanbase/seekdb_ci_filtered_dense_topk_test.go' | sha256sum --check
           test -d source/internal/service/document
-          rm -f -- source/internal/service/document/seekdb_ci_legacy_document_rerun_test.go
+          [[ ! -e source/internal/service/document/seekdb_ci_legacy_document_rerun_test.go && ! -L source/internal/service/document/seekdb_ci_legacy_document_rerun_test.go ]] || { echo "Supplemental fixture path already exists in source"; exit 1; }
           curl --fail --silent --show-error --location --retry 3 "https://raw.githubusercontent.com/hnwyllmm/ragflow/82df5f22bcf69efed0e4f1498848aa0273d3c786/ci/seekdb/legacy_document_rerun_test.go" -o source/internal/service/document/seekdb_ci_legacy_document_rerun_test.go
           echo '6ff00c514cfc3a0b16bf8994e262462fb11b91b944e7a6a11317408069f1f1d8  source/internal/service/document/seekdb_ci_legacy_document_rerun_test.go' | sha256sum --check
 
@@ -158,7 +155,7 @@ jobs:
           set -euo pipefail
           cd source
           go test -tags=integration -count=1 -timeout=10m -json \
-            -run '^(TestLegacyStorageRoundTrip|TestFilteredDenseTopK)$' ./internal/engine/oceanbase/ \
+            ./internal/engine/oceanbase/ \
             | tee ../results/go-engine-test.jsonl
           go test -tags=integration -count=1 -timeout=10m -json \
             -run '^TestLegacyTableReparseDelete22082$' ./internal/service/document/ \
@@ -171,13 +168,19 @@ jobs:
           import json
           from pathlib import Path
           suites = {
-              'go-engine-test.jsonl': ('ragflow/internal/engine/oceanbase', ('TestLegacyStorageRoundTrip', 'TestFilteredDenseTopK')),
+              'go-engine-test.jsonl': ('ragflow/internal/engine/oceanbase', ('TestFilteredDenseTopK',)),
               'go-document-test.jsonl': ('ragflow/internal/service/document', ('TestLegacyTableReparseDelete22082',)),
           }
           for log_name, (package, names) in suites.items():
               events = [json.loads(line) for line in (Path('results') / log_name).read_text().splitlines() if line.strip()]
               assert not any(e.get('Action') in ('skip', 'fail') for e in events), f'{log_name}: skipped or failed test'
               package_events = [e for e in events if e.get('Package') == package]
+              started = {e['Test'] for e in package_events if e.get('Action') == 'run' and 'Test' in e and '/' not in e['Test']}
+              passed = {e['Test'] for e in package_events if e.get('Action') == 'pass' and 'Test' in e and '/' not in e['Test']}
+              assert started, f'{package}: no tests ran'
+              assert started <= passed, f'{package}: tests without a pass: {sorted(started - passed)}'
+              if log_name == 'go-engine-test.jsonl':
+                  print(f'Upstream engine tests passed: {len(passed - set(names))}')
               for name in names:
                   actions = {e.get('Action') for e in package_events if e.get('Test') == name}
                   assert {'run', 'pass'} <= actions, f'{name} did not execute and pass'
