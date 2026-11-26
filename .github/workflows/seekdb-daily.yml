@@ -17,7 +17,7 @@ on:
 permissions: {}
 jobs:
   seekdb:
-    uses: hnwyllmm/ragflow/.github/workflows/seekdb-ci.yml@5cb0a5be2ac7406b30599454653a59986fcb33fb
+    uses: hnwyllmm/ragflow/.github/workflows/seekdb-ci.yml@602a031b18fcd1cc062405cf860ed425e85a09e4
     with:
       pr: ${{ inputs.pr || '' }}
       source_sha: ${{ inputs.source_sha || '' }}
