@@ -14,21 +14,21 @@ import (
 	"ragflow/internal/server/config"
 )
 
-// TestFilteredDenseTopK catches both cross-dataset leakage and applying the
+// TestSeekdbCIFilteredDenseTopK catches both cross-dataset leakage and applying the
 // dataset filter only after global top-K truncation. It runs against a real DB;
 // an absent connection configuration is a failure rather than a passing skip.
-func TestFilteredDenseTopK(t *testing.T) {
+func TestSeekdbCIFilteredDenseTopK(t *testing.T) {
 	host := os.Getenv("RAGFLOW_TEST_OCEANBASE_HOST")
 	if host == "" {
 		t.Fatal("RAGFLOW_TEST_OCEANBASE_HOST must be set for this real-database regression")
 	}
-	port, err := strconv.Atoi(envOr("RAGFLOW_TEST_OCEANBASE_PORT", "2881"))
+	port, err := strconv.Atoi(seekdbCITopKEnvOr("RAGFLOW_TEST_OCEANBASE_PORT", "2881"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine, err := NewEngine(envOr("RAGFLOW_TEST_OCEANBASE_ENGINE_TYPE", "oceanbase"), config.OceanBaseConnectionConfig{
-		DBName:   envOr("RAGFLOW_TEST_OCEANBASE_DBNAME", "test"),
-		User:     envOr("RAGFLOW_TEST_OCEANBASE_USER", "root@test"),
+	engine, err := NewEngine(seekdbCITopKEnvOr("RAGFLOW_TEST_OCEANBASE_ENGINE_TYPE", "oceanbase"), config.OceanBaseConnectionConfig{
+		DBName:   seekdbCITopKEnvOr("RAGFLOW_TEST_OCEANBASE_DBNAME", "test"),
+		User:     seekdbCITopKEnvOr("RAGFLOW_TEST_OCEANBASE_USER", "root@test"),
 		Password: os.Getenv("RAGFLOW_TEST_OCEANBASE_PASSWORD"),
 		Host:     host, Port: port, MaxConnections: 4,
 	})
@@ -42,7 +42,7 @@ func TestFilteredDenseTopK(t *testing.T) {
 	// Time only isolates the table name, never the vectors or ranking oracle.
 	table := "ragflow_filtered_topk_" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	const allowedKB, foreignKB = "allowed-kb", "foreign-kb"
-	defer cleanupChunkStore(t, engine, table, "")
+	defer seekdbCITopKCleanup(t, engine, table)
 	if err := engine.CreateChunkStore(ctx, table, allowedKB, 2, "naive", ""); err != nil {
 		t.Fatal(err)
 	}
@@ -94,4 +94,20 @@ func TestFilteredDenseTopK(t *testing.T) {
 	// Reverse isolation and a filter miss must not fall back to unfiltered hits.
 	search([]string{foreignKB}, []string{"foreign-nearest"}, []string{foreignKB})
 	search([]string{"absent-kb"}, []string{}, []string{})
+}
+
+func seekdbCITopKEnvOr(name, fallback string) string {
+	if value := os.Getenv(name); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func seekdbCITopKCleanup(t *testing.T, engine *Engine, table string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	if err := engine.DropChunkStore(ctx, table, ""); err != nil {
+		t.Errorf("clean up chunk store %s: %v", table, err)
+	}
 }
