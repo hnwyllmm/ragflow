@@ -8,12 +8,17 @@ on:
         description: 'infiniflow/ragflow PR number; empty tests latest upstream main'
         type: string
         default: ''
+      source_sha:
+        description: 'Exact upstream commit (optional, mutually exclusive with pr)'
+        type: string
+        default: ''
   schedule:
     - cron: '23 22 * * *' # Daily 06:23 UTC+08:00; GitHub may delay scheduled runs.
 permissions: {}
 jobs:
   seekdb:
-    uses: hnwyllmm/ragflow/.github/workflows/seekdb-ci.yml@e533136d89f8d7b234822424c9eb1ce46e767d78
+    uses: hnwyllmm/ragflow/.github/workflows/seekdb-ci.yml@5cb0a5be2ac7406b30599454653a59986fcb33fb
     with:
       pr: ${{ inputs.pr || '' }}
+      source_sha: ${{ inputs.source_sha || '' }}
     # Deliberately no secrets: inherit.
